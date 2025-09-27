@@ -86,4 +86,8 @@ class Engine : public EngineControllerBase {
   std::optional<GoParams> last_go_params_ = std::nullopt;
 };
 
+constexpr char kPathIntegralLambda[] = "PathIntegralLambda";
+constexpr char kPathIntegralSamples[] = "PathIntegralSamples";
+constexpr char kPathIntegralRewardMode[] = "PathIntegralRewardMode";
+
 }  // namespace lczero
