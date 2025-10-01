@@ -28,8 +28,6 @@
 #include "engine.h"
 
 #include <algorithm>
-#include <cmath>
-#include <random>
 
 #include "chess/position.h"
 #include "neural/backend.h"
@@ -64,22 +62,6 @@ const OptionId kPonderId{
 
 const OptionId kPreload{"preload", "",
                         "Initialize backend and load net on engine startup."};
-const OptionId kPathIntegralLambda{
-    {.long_flag = "path-integral-lambda",
-     .uci_option = "PathIntegralLambda",
-     .help_text = "The lambda parameter for path integral training.",
-     .visibility = OptionId::kAlwaysVisible}};
-const OptionId kPathIntegralSamples{
-    {.long_flag = "path-integral-samples",
-     .uci_option = "PathIntegralSamples",
-     .help_text = "The number of samples to use for path integral training.",
-     .visibility = OptionId::kAlwaysVisible}};
-const OptionId kPathIntegralRewardMode{
-    {.long_flag = "path-integral-reward-mode",
-     .uci_option = "PathIntegralRewardMode",
-     .help_text = "The reward mode for path integral training.",
-     .visibility = OptionId::kAlwaysVisible}};
-
 }  // namespace
 
 void Engine::PopulateOptions(OptionsParser* options) {
@@ -87,12 +69,6 @@ void Engine::PopulateOptions(OptionsParser* options) {
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<BoolOption>(kStrictUciTiming) = false;
   options->Add<BoolOption>(kPreload) = false;
-  options->Add<FloatOption>(kPathIntegralLambda) = 0.1f;
-  options->Get<FloatOption>(kPathIntegralLambda).SetRange(0.001f, 10.0f);
-  options->Add<IntOption>(kPathIntegralSamples) = 50;
-  options->Get<IntOption>(kPathIntegralSamples).SetRange(1, 100000);
-  options->Add<StringOption>(kPathIntegralRewardMode) = "hybrid";
-  options->Get<StringOption>(kPathIntegralRewardMode).SetValues({"policy", "cp_score", "hybrid"});
 }
 
 namespace {
@@ -189,16 +165,6 @@ void Engine::UpdateBackendConfig() {
   LOGFILE << "Update backend configuration.";
   const std::string backend_name =
       options_.Get<std::string>(SharedBackendParams::kBackendId);
-
-  // Path Integral aktifse temperature'ı override et
-  if (options_.Get<IntOption>(kPathIntegralSamples) > 0) {
-    float temp = 0.7f;
-    if (options_.Has("Temperature")) {
-      temp = options_.Get<FloatOption>("Temperature");
-    }
-    const_cast<OptionsDict&>(options_).Set("Temperature", temp);
-  }
-
   if (!backend_ || backend_name != backend_name_ ||
       backend_->UpdateConfiguration(options_) == Backend::NEED_RESTART) {
     backend_name_ = backend_name;
@@ -276,22 +242,6 @@ void Engine::Go(const GoParams& params) {
   if (!last_position_) NewGame();
   if (ponder_enabled_) InitializeSearchPosition(params.ponder);
   last_go_params_ = params;
-
-  // Path Integral Sampling entegrasyonu
-  if (options_.Get<IntOption>(kPathIntegralSamples) > 0) {
-    auto sampling_results = PathIntegralSample(*last_position_);
-    // UCI info satırı ile sampling sonuçlarını ilet
-    for (const auto& [move, prob] : sampling_results) {
-      std::ostringstream oss;
-      oss << "info string path_integral_move " << move.ToUci() << " prob " << prob;
-      if (uci_forwarder_) {
-        BestMoveInfo info;
-        info.info_string = oss.str();
-        uci_forwarder_->OutputBestMove(&info);
-      }
-    }
-  }
-
   search_->StartSearch(params);
 }
 
@@ -316,56 +266,6 @@ void Engine::RegisterUciResponder(UciResponder* responder) {
 
 void Engine::UnregisterUciResponder(UciResponder* responder) {
   uci_forwarder_->Unregister(responder);
-}
-
-// Path Integral Sampling fonksiyonu
-std::vector<std::pair<Move, float>> Engine::PathIntegralSample(const GameState& state) {
-  float lambda = options_.Get<FloatOption>(kPathIntegralLambda);
-  int samples = options_.Get<IntOption>(kPathIntegralSamples);
-  std::string reward_mode = options_.Get<StringOption>(kPathIntegralRewardMode);
-
-  // Root pozisyonunu al
-  const Position& position = state.startpos;
-  // Legal hamleleri al
-  std::vector<Move> legal_moves = position.GetLegalMoves();
-  // Policy ve value skorlarını backend'den al
-  std::vector<float> policy_scores = backend_->GetPolicyScores(position);
-  float value_score = backend_->GetValueScore(position);
-
-  std::vector<float> scores;
-  std::vector<Move> moves;
-  for (size_t i = 0; i < legal_moves.size(); ++i) {
-    float policy = (i < policy_scores.size()) ? policy_scores[i] : 0.0f;
-    float cp_score = value_score;
-    float score = 0.0f;
-    if (reward_mode == "policy") score = policy;
-    else if (reward_mode == "cp_score") score = cp_score;
-    else if (reward_mode == "hybrid") score = policy * std::exp(lambda * cp_score);
-    moves.push_back(legal_moves[i]);
-    scores.push_back(score);
-  }
-  // Softmax (log-sum-exp)
-  float max_score = *std::max_element(scores.begin(), scores.end());
-  std::vector<float> arr_scaled;
-  for (float s : scores) arr_scaled.push_back((s - max_score) * lambda);
-  float sum_exp = 0.0f;
-  for (float v : arr_scaled) sum_exp += std::exp(v);
-  float log_sum_exp = std::log(sum_exp);
-  std::vector<float> probs;
-  for (float v : arr_scaled) probs.push_back(std::exp(v - log_sum_exp));
-  // Güvenlik: nan veya negatif toplam varsa eşit olasılık
-  float total_prob = 0.0f;
-  for (float p : probs) total_prob += p;
-  if (std::isnan(total_prob) || total_prob <= 0.0f) {
-    float eq = 1.0f / probs.size();
-    for (size_t i = 0; i < probs.size(); i++) probs[i] = eq;
-  }
-  // Sonuçları döndür
-  std::vector<std::pair<Move, float>> result;
-  for (size_t i = 0; i < moves.size(); ++i) {
-    result.push_back({moves[i], probs[i]});
-  }
-  return result;
 }
 
 }  // namespace lczero

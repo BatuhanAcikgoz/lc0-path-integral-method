@@ -117,9 +117,6 @@ class Backend {
     return ConfigurationHash(opts) == current_config_hash_;
   }
 
-  virtual std::vector<float> GetPolicyScores(const Position& position) = 0;
-  virtual float GetValueScore(const Position& position) = 0;
-
  private:
   // Gets a hash of the backend configuration, to help detect changes.
   virtual uint64_t ConfigurationHash(const OptionsDict&) const;
