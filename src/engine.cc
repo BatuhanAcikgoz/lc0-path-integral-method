@@ -28,13 +28,22 @@
 #include "engine.h"
 
 #include <algorithm>
-
+#include "chess/board.h"  // Taş sabitleri için
+#include "utils/string.h" // SquareToString için (muhtemelen bu dosyada)
 #include "chess/position.h"
+#include "chess/callbacks.h"
 #include "neural/backend.h"
 #include "neural/memcache.h"
 #include "neural/register.h"
 #include "neural/shared_params.h"
 #include "syzygy/syzygy.h"
+#include "utils/optionsparser.h"
+#include "chess/types.h"
+#ifdef USE_PATH_INTEGRAL
+#include "search/path_integral/controller_simple.h"
+#include "search/path_integral/interfaces.h"
+#include "search/path_integral/options.h"
+#endif
 
 namespace lczero {
 namespace {
@@ -62,13 +71,27 @@ const OptionId kPonderId{
 
 const OptionId kPreload{"preload", "",
                         "Initialize backend and load net on engine startup."};
+
 }  // namespace
+
+// Path Integral UCI option definitions with external linkage
+// (defined in search/path_integral/options.cc)
 
 void Engine::PopulateOptions(OptionsParser* options) {
   options->Add<BoolOption>(kPonderId) = false;
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<BoolOption>(kStrictUciTiming) = false;
   options->Add<BoolOption>(kPreload) = false;
+  
+  // Register Path Integral UCI options
+  options->Add<FloatOption>(kPathIntegralLambdaId, 0.001f, 10.0f) = 0.1f;
+  options->Add<IntOption>(kPathIntegralSamplesId, 1, 100000) = 50;
+  
+  std::vector<std::string> reward_modes = {"policy", "cp_score", "hybrid"};
+  options->Add<ChoiceOption>(kPathIntegralRewardModeId, reward_modes) = "hybrid";
+  
+  std::vector<std::string> sampling_modes = {"competitive", "quantum_limit"};
+  options->Add<ChoiceOption>(kPathIntegralModeId, sampling_modes) = "competitive";
 }
 
 namespace {
@@ -148,6 +171,11 @@ Engine::Engine(const SearchFactory& factory, const OptionsDict& opts)
     : uci_forwarder_(std::make_unique<UciPonderForwarder>(this)),
       options_(opts),
       search_(factory.CreateSearch(uci_forwarder_.get(), &options_)) {
+#ifdef USE_PATH_INTEGRAL
+  // Initialize Path Integral controller
+  path_integral_controller_ = std::make_unique<SimplePathIntegralController>(options_);
+#endif
+  
   if (options_.Get<bool>(kPreload)) {
     UpdateBackendConfig();
     EnsureSyzygyTablebasesLoaded();
@@ -230,8 +258,17 @@ void Engine::SetPosition(const std::string& fen,
 void Engine::NewGame() {
   if (backend_) backend_->ClearCache();
   search_->NewGame();
+  
+#ifdef USE_PATH_INTEGRAL
+  // Update Path Integral options in case they changed
+  if (path_integral_controller_) {
+    path_integral_controller_->UpdateOptions(options_);
+  }
+#endif
+  
   SetPosition(ChessBoard::kStartposFen, {});
 }
+
 
 void Engine::Go(const GoParams& params) {
   if (!ponder_enabled_ && params.ponder) {
@@ -242,6 +279,50 @@ void Engine::Go(const GoParams& params) {
   if (!last_position_) NewGame();
   if (ponder_enabled_) InitializeSearchPosition(params.ponder);
   last_go_params_ = params;
+
+#ifdef USE_PATH_INTEGRAL
+  // Try Path Integral move selection first if enabled
+  if (path_integral_controller_ && path_integral_controller_->IsEnabled()) {
+    try {
+      LOGFILE << "Path Integral: Attempting to use Path Integral sampling";
+      
+      // Convert GameState to Position for Path Integral controller
+      Position position = last_position_->startpos;
+      for (const auto& move : last_position_->moves) {
+        position = Position(position, move);
+      }
+      
+      // Create SearchLimits from GoParams
+      SearchLimits limits;
+      limits.depth = params.depth.value_or(-1);
+      limits.nodes = params.nodes.value_or(-1);
+      limits.time_ms = params.movetime.value_or(-1);
+
+      // Try Path Integral move selection
+      Move selected_move = path_integral_controller_->SelectMove(position, limits);
+      
+      if (!selected_move.is_null()) {
+        // Build move string using built-in formatter (non-chess960 for logs)
+        const bool c960_for_log = false;
+        std::string move_str = selected_move.ToString(c960_for_log);
+
+        LOGFILE << "Path Integral: Selected move " << move_str;
+
+        // BestMoveInfo requires a bestmove argument
+        BestMoveInfo info(selected_move);
+        uci_forwarder_->OutputBestMove(&info);
+        return;
+      } else {
+        LOGFILE << "Path Integral: Failed to select move, falling back to standard search";
+      }
+      
+    } catch (const std::exception& e) {
+      CERR << "Path Integral error: " << e.what() << ", falling back to standard search";
+    }
+  }
+#endif
+
+  // Standard LC0 search (fallback or when Path Integral is disabled)
   search_->StartSearch(params);
 }
 

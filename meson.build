@@ -203,6 +203,22 @@ files += [
   'src/search/instamove/instamove.cc',
 ]
 
+#############################################################################
+## PATH INTEGRAL SEARCH
+#############################################################################
+path_integral_enabled = get_option('path_integral')
+
+if path_integral_enabled
+  add_project_arguments('-DUSE_PATH_INTEGRAL', language : 'cpp')
+  
+  common_files += [
+    'src/search/path_integral/config.cc',
+    'src/search/path_integral/softmax.cc',
+    'src/search/path_integral/controller_simple.cc',
+    'src/search/path_integral/options.cc',
+  ]
+endif
+
 includes += include_directories('src')
 
 deps += dependency('absl_flat_hash_map',
@@ -889,6 +905,15 @@ if get_option('gtest')
                'src/neural/memcache.cc', pb_files,
     include_directories: includes, link_with: lc0_lib, dependencies: [gtest, gmock]),
     args: '--gtest_output=xml:engine_test.xml', timeout: 90)
+
+  # Path Integral Tests (conditional compilation)
+  if get_option('path_integral')
+    # Only include the basic softmax test which is already implemented
+    test('SoftmaxCalculatorTest',
+      executable('softmax_test', 'src/search/path_integral/softmax_test.cc',
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:softmax.xml', timeout: 90)
+  endif
 endif
 
 

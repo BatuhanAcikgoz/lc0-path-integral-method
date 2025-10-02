@@ -35,6 +35,12 @@
 #include "search/search.h"
 #include "syzygy/syzygy.h"
 
+#ifdef USE_PATH_INTEGRAL
+namespace lczero {
+class SimplePathIntegralController;
+}
+#endif
+
 namespace lczero {
 
 class Engine : public EngineControllerBase {
@@ -84,6 +90,11 @@ class Engine : public EngineControllerBase {
   std::optional<GameState> last_position_ = std::nullopt;
   // Go parameters for the last search. Used on ponder.
   std::optional<GoParams> last_go_params_ = std::nullopt;
+
+#ifdef USE_PATH_INTEGRAL
+  // Path Integral controller for enhanced move selection
+  std::unique_ptr<SimplePathIntegralController> path_integral_controller_;
+#endif
 };
 
 }  // namespace lczero

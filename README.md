@@ -5,6 +5,17 @@
 
 Lc0 is a UCI-compliant chess engine designed to play chess via neural network, specifically those of the [LeelaChessZero project](https://lczero.org).
 
+## Path Integral Sampling
+
+Lc0 includes advanced Path Integral Sampling functionality that enables sophisticated position analysis and move selection through quantum-inspired sampling methods. This feature provides:
+
+- **Competitive Mode**: Optimal move selection combining LC0's search capabilities with Path Integral sampling
+- **Quantum Limit Mode**: Detailed analysis using policy and value heads with configurable reward modes
+- **Configurable Parameters**: Lambda values, sample counts, and reward modes via UCI options
+- **Export Capabilities**: JSON and CSV export of sampling results for research and analysis
+
+For detailed information about Path Integral configuration and usage, see the [Path Integral Documentation](src/search/path_integral/README.md).
+
 ## Downloading source
 
 Lc0 can be acquired either via a git clone or an archive download from GitHub.
