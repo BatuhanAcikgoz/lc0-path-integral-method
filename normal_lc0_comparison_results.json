@@ -1,0 +1,51 @@
+{
+  "normal_lc0": {
+    "opening": {
+      "0.1_25_competitive": {
+        "best_move": "d2d4",
+        "evaluation": 15,
+        "time": 7.5686807179990865,
+        "nodes": 22452,
+        "nps": 4330,
+        "pv_length": 27,
+        "success": true,
+        "error": null
+      },
+      "0.1_50_competitive": {
+        "best_move": "d2d4",
+        "evaluation": 15,
+        "time": 0.23249368800134107,
+        "nodes": 23994,
+        "nps": 7182,
+        "pv_length": 27,
+        "success": true,
+        "error": null
+      }
+    }
+  },
+  "engine_py": {
+    "opening": {
+      "0.1_25_competitive": {
+        "best_move": null,
+        "evaluation": 0,
+        "time": 2.1353344319995813,
+        "nodes": 0,
+        "nps": 0,
+        "paths_generated": 0,
+        "success": true,
+        "error": null
+      },
+      "0.1_50_competitive": {
+        "best_move": null,
+        "evaluation": 0,
+        "time": 0.012407301001076121,
+        "nodes": 0,
+        "nps": 0,
+        "paths_generated": 0,
+        "success": true,
+        "error": null
+      }
+    }
+  },
+  "comparison": {}
+}

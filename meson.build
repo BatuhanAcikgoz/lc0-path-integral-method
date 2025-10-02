@@ -210,6 +210,7 @@ path_integral_enabled = get_option('path_integral')
 
 if path_integral_enabled
   add_project_arguments('-DUSE_PATH_INTEGRAL', language : 'cpp')
+  add_project_arguments('-DPATH_INTEGRAL_ENABLED', language : 'cpp')
   
   common_files += [
     'src/search/path_integral/config.cc',

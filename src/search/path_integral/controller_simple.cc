@@ -2,6 +2,7 @@
 #include "utils/logging.h"
 #include "chess/position.h"
 #include "utils/optionsparser.h"
+#include "neural/backend.h"
 #include <random>
 #include <cmath>
 
@@ -10,7 +11,8 @@
 namespace lczero {
 
 
-SimplePathIntegralController::SimplePathIntegralController(const OptionsDict& options) {
+SimplePathIntegralController::SimplePathIntegralController(const OptionsDict& options, Backend* backend)
+    : backend_(backend) {
   softmax_calculator_ = std::make_unique<SoftmaxCalculator>();
   UpdateConfigFromOptions(options);
 }
@@ -23,13 +25,24 @@ Move SimplePathIntegralController::SelectMove(const Position& position, const Se
     return Move();
   }
   
+  if (config_.debug_logging) {
+    CERR << "Path Integral: Starting move selection with Lambda=" << config_.lambda 
+         << " Samples=" << config_.samples 
+         << " Mode=" << PathIntegralConfig::SamplingModeToString(config_.sampling_mode);
+  }
+  
   try {
-    // For now, only implement competitive mode
+    // Implement both competitive and quantum limit modes
     if (config_.sampling_mode == PathIntegralSamplingMode::kCompetitive) {
       return HandleCompetitiveMode(position, limits);
+    } else if (config_.sampling_mode == PathIntegralSamplingMode::kQuantumLimit) {
+      return HandleQuantumLimitMode(position, limits);
     }
     
-    // Quantum limit mode not implemented yet, fallback
+    // Unknown mode, fallback
+    if (config_.debug_logging) {
+      CERR << "Path Integral: Unknown sampling mode, falling back to standard LC0";
+    }
     return Move();
     
   } catch (const std::exception& e) {
@@ -177,11 +190,46 @@ Move SimplePathIntegralController::SelectMoveFromSampling(const std::vector<Samp
 }
 
 float SimplePathIntegralController::EvaluateMove(const Position& position, const Move& move) {
-  // Simple evaluation: for now, just return a basic heuristic score
-  // In a full implementation, this would use the neural network backend
-  // to get proper policy and value evaluations
+  // Use neural network backend for proper evaluation if available
+  if (backend_) {
+    try {
+      // Create position after the move
+      Position new_position(position, move);
+      
+      // Get legal moves for the new position
+      MoveList legal_moves = new_position.GetBoard().GenerateLegalMoves();
+      
+      // Create evaluation position
+      EvalPosition eval_pos;
+      eval_pos.pos = std::span<const Position>(&new_position, 1);
+      eval_pos.legal_moves = std::span<const Move>(legal_moves.begin(), legal_moves.size());
+      
+      // Try to get cached evaluation first
+      auto cached_result = backend_->GetCachedEvaluation(eval_pos);
+      if (cached_result.has_value()) {
+        // Return Q value (from white's perspective)
+        return cached_result->q;
+      }
+      
+      // If not cached, evaluate using backend
+      std::vector<EvalPosition> positions = {eval_pos};
+      auto results = backend_->EvaluateBatch(positions);
+      
+      if (!results.empty()) {
+        // Return Q value (from white's perspective)
+        return results[0].q;
+      }
+      
+    } catch (const std::exception& e) {
+      if (config_.debug_logging) {
+        CERR << "Path Integral: Neural network evaluation failed for move " 
+             << move.ToString(false) << ": " << e.what();
+      }
+      // Fall through to heuristic evaluation
+    }
+  }
   
-  // Basic heuristic: prefer captures and central moves
+  // Fallback to basic heuristic evaluation
   float score = 0.0f;
   
   // Bonus for captures
@@ -200,13 +248,148 @@ float SimplePathIntegralController::EvaluateMove(const Position& position, const
   }
   
   // Add some randomness to simulate sampling variation
-  // This is a placeholder - real implementation would use neural network
   static thread_local std::random_device rd;
   static thread_local std::mt19937 gen(rd());
   std::normal_distribution<float> noise(0.0f, 0.1f);
   score += noise(gen);
   
   return score;
+}
+
+Move SimplePathIntegralController::HandleQuantumLimitMode(const Position& position, const SearchLimits& limits) {
+  try {
+    // Generate legal moves for the current position
+    auto legal_moves = position.GetBoard().GenerateLegalMoves();
+    if (legal_moves.empty()) {
+      return Move(); // No legal moves, fallback
+    }
+    
+    if (config_.debug_logging) {
+      CERR << "Path Integral: Quantum Limit mode with reward mode " 
+           << PathIntegralConfig::RewardModeToString(config_.reward_mode);
+    }
+    
+    // Perform quantum limit sampling with reward modes
+    auto sampling_results = PerformQuantumLimitSampling(position, legal_moves);
+    if (sampling_results.empty()) {
+      return Move(); // Sampling failed, fallback
+    }
+    
+    // Apply softmax to move scores and select best move
+    return SelectMoveFromSampling(sampling_results, legal_moves);
+    
+  } catch (const std::exception& e) {
+    CERR << "Path Integral quantum limit mode error: " << e.what();
+    return Move(); // Fallback on any error
+  }
+}
+
+std::vector<SimplePathIntegralController::SampleResult> 
+SimplePathIntegralController::PerformQuantumLimitSampling(const Position& position, const MoveList& legal_moves) {
+  std::vector<SampleResult> results;
+  results.reserve(legal_moves.size());
+  
+  if (config_.debug_logging) {
+    CERR << "Path Integral: Quantum Limit sampling " << legal_moves.size() << " legal moves with " 
+         << config_.samples << " samples, reward mode=" 
+         << PathIntegralConfig::RewardModeToString(config_.reward_mode);
+  }
+  
+  // For each legal move, evaluate using the specified reward mode
+  for (const auto& move : legal_moves) {
+    float total_score = 0.0f;
+    int valid_samples = 0;
+    
+    // Generate multiple samples for this move
+    for (int sample = 0; sample < config_.samples; ++sample) {
+      try {
+        float score = 0.0f;
+        
+        // Apply reward mode
+        switch (config_.reward_mode) {
+          case PathIntegralRewardMode::kPolicy:
+            score = EvaluateMovePolicy(position, move);
+            break;
+          case PathIntegralRewardMode::kCpScore:
+            score = EvaluateMove(position, move);  // Use Q-value as CP score
+            break;
+          case PathIntegralRewardMode::kHybrid:
+            {
+              float policy_score = EvaluateMovePolicy(position, move);
+              float cp_score = EvaluateMove(position, move);
+              score = policy_score * cp_score;  // Hybrid: policy * cp_score
+            }
+            break;
+        }
+        
+        if (std::isfinite(score)) {
+          total_score += score;
+          valid_samples++;
+        }
+      } catch (const std::exception& e) {
+        // Skip invalid samples
+        if (config_.debug_logging) {
+          CERR << "Path Integral: Quantum sample failed for move " << move.ToString(false) << ": " << e.what();
+        }
+      }
+    }
+    
+    if (valid_samples > 0) {
+      float avg_score = total_score / valid_samples;
+      results.push_back({move, avg_score, 0.0f}); // probability will be calculated later
+    }
+  }
+  
+  return results;
+}
+
+float SimplePathIntegralController::EvaluateMovePolicy(const Position& position, const Move& move) {
+  // Use neural network backend for policy evaluation if available
+  if (backend_) {
+    try {
+      // Get legal moves for current position
+      MoveList legal_moves = position.GetBoard().GenerateLegalMoves();
+      
+      // Create evaluation position
+      EvalPosition eval_pos;
+      eval_pos.pos = std::span<const Position>(&position, 1);
+      eval_pos.legal_moves = std::span<const Move>(legal_moves.begin(), legal_moves.size());
+      
+      // Try to get cached evaluation first
+      auto cached_result = backend_->GetCachedEvaluation(eval_pos);
+      if (cached_result.has_value()) {
+        // Find the policy probability for this move
+        for (size_t i = 0; i < legal_moves.size(); ++i) {
+          if (legal_moves[i] == move && i < cached_result->p.size()) {
+            return cached_result->p[i];
+          }
+        }
+      }
+      
+      // If not cached, evaluate using backend
+      std::vector<EvalPosition> positions = {eval_pos};
+      auto results = backend_->EvaluateBatch(positions);
+      
+      if (!results.empty()) {
+        // Find the policy probability for this move
+        for (size_t i = 0; i < legal_moves.size(); ++i) {
+          if (legal_moves[i] == move && i < results[0].p.size()) {
+            return results[0].p[i];
+          }
+        }
+      }
+      
+    } catch (const std::exception& e) {
+      if (config_.debug_logging) {
+        CERR << "Path Integral: Neural network policy evaluation failed for move " 
+             << move.ToString(false) << ": " << e.what();
+      }
+    }
+  }
+  
+  // Fallback to uniform policy
+  MoveList legal_moves = position.GetBoard().GenerateLegalMoves();
+  return 1.0f / std::max(1, static_cast<int>(legal_moves.size()));
 }
 
 } // namespace lczero

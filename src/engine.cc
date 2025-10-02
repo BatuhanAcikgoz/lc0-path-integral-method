@@ -83,6 +83,7 @@ void Engine::PopulateOptions(OptionsParser* options) {
   options->Add<BoolOption>(kStrictUciTiming) = false;
   options->Add<BoolOption>(kPreload) = false;
   
+#ifdef PATH_INTEGRAL_ENABLED
   // Register Path Integral UCI options
   options->Add<FloatOption>(kPathIntegralLambdaId, 0.001f, 10.0f) = 0.1f;
   options->Add<IntOption>(kPathIntegralSamplesId, 1, 100000) = 50;
@@ -92,6 +93,7 @@ void Engine::PopulateOptions(OptionsParser* options) {
   
   std::vector<std::string> sampling_modes = {"competitive", "quantum_limit"};
   options->Add<ChoiceOption>(kPathIntegralModeId, sampling_modes) = "competitive";
+#endif
 }
 
 namespace {
@@ -172,7 +174,7 @@ Engine::Engine(const SearchFactory& factory, const OptionsDict& opts)
       options_(opts),
       search_(factory.CreateSearch(uci_forwarder_.get(), &options_)) {
 #ifdef USE_PATH_INTEGRAL
-  // Initialize Path Integral controller
+  // Initialize Path Integral controller (backend will be set later in UpdateBackendConfig)
   path_integral_controller_ = std::make_unique<SimplePathIntegralController>(options_);
 #endif
   
@@ -199,6 +201,13 @@ void Engine::UpdateBackendConfig() {
     backend_ = CreateMemCache(BackendManager::Get()->CreateFromParams(options_),
                               options_);
     search_->SetBackend(backend_.get());
+    
+#ifdef USE_PATH_INTEGRAL
+    // Update Path Integral controller with new backend
+    if (path_integral_controller_) {
+      path_integral_controller_ = std::make_unique<SimplePathIntegralController>(options_, backend_.get());
+    }
+#endif
   } else {
     backend_->SetCacheSize(
         options_.Get<int>(SharedBackendParams::kNNCacheSizeId));
@@ -281,44 +290,16 @@ void Engine::Go(const GoParams& params) {
   last_go_params_ = params;
 
 #ifdef USE_PATH_INTEGRAL
-  // Try Path Integral move selection first if enabled
+  // Path Integral integration - currently in development
+  // For now, let LC0's standard search handle move selection
+  // Path Integral will be integrated into the search process in future versions
+  
   if (path_integral_controller_ && path_integral_controller_->IsEnabled()) {
-    try {
-      LOGFILE << "Path Integral: Attempting to use Path Integral sampling";
-      
-      // Convert GameState to Position for Path Integral controller
-      Position position = last_position_->startpos;
-      for (const auto& move : last_position_->moves) {
-        position = Position(position, move);
-      }
-      
-      // Create SearchLimits from GoParams
-      SearchLimits limits;
-      limits.depth = params.depth.value_or(-1);
-      limits.nodes = params.nodes.value_or(-1);
-      limits.time_ms = params.movetime.value_or(-1);
-
-      // Try Path Integral move selection
-      Move selected_move = path_integral_controller_->SelectMove(position, limits);
-      
-      if (!selected_move.is_null()) {
-        // Build move string using built-in formatter (non-chess960 for logs)
-        const bool c960_for_log = false;
-        std::string move_str = selected_move.ToString(c960_for_log);
-
-        LOGFILE << "Path Integral: Selected move " << move_str;
-
-        // BestMoveInfo requires a bestmove argument
-        BestMoveInfo info(selected_move);
-        uci_forwarder_->OutputBestMove(&info);
-        return;
-      } else {
-        LOGFILE << "Path Integral: Failed to select move, falling back to standard search";
-      }
-      
-    } catch (const std::exception& e) {
-      CERR << "Path Integral error: " << e.what() << ", falling back to standard search";
-    }
+    LOGFILE << "Path Integral: Enabled but delegating to LC0 search system";
+    
+    // TODO: Integrate Path Integral sampling into LC0's search tree
+    // This will require modifying the MCTS algorithm to use Path Integral sampling
+    // at the root node while maintaining LC0's search quality
   }
 #endif
 

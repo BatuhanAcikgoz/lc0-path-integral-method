@@ -21,3 +21,17 @@ compile_flags.txt
 .mesonpy*
 /.idea
 /.kiro
+error.txt
+path_integral_overall_system_flow_v2.svg
+PATH_INTEGRAL_SIMPLIFIED_SUMMARY.md
+path_integral_quantum_mode_flow_v2.svg
+path_integral_softmax_mathematical_flow_v2.svg
+PATH_INTEGRAL_USER_GUIDE.md
+PATH_INTEGRAL_USAGE_EXAMPLES.md
+src/search/path_integral/DEPLOYMENT_CHECKLIST.md
+src/search/path_integral/INTEGRATION_EXAMPLES.md
+src/search/path_integral/PATH_INTEGRAL_DOCUMENTATION.md
+src/search/path_integral/PERFORMANCE_GUIDELINES.md
+TASK_5_IMPLEMENTATION_SUMMARY.md
+TASK_5_INTEGRATION_SUMMARY.md
+TASK_6_IMPLEMENTATION_SUMMARY.md
