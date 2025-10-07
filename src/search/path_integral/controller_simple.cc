@@ -131,7 +131,7 @@ void SimplePathIntegralController::UpdateConfigFromOptions(const OptionsDict& op
   }
 }
 
-Move SimplePathIntegralController::HandleCompetitiveMode(const Position& position, const SearchLimits& limits) {
+Move SimplePathIntegralController::HandleCompetitiveMode(const Position& position, const SearchLimits&) {
   try {
     // Generate legal moves for the current position
     auto legal_moves = position.GetBoard().GenerateLegalMoves();

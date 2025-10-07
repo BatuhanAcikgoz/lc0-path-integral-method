@@ -758,7 +758,6 @@ void Search::EnsureBestMoveKnown() REQUIRES(nodes_mutex_)
       // Silently fall back to standard selection on any error
     }
   }
-#endif
 
   // Fallback to standard move selection
   auto bestmove_edge = temperature

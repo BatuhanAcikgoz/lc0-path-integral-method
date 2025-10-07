@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""
+Path Integral Test Script
+Bu script LC0'ın Path Integral özelliklerini test eder ve performans metriklerini gösterir.
+"""
+
+import chess
+import chess.engine
+import time
+import sys
+import os
+from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class TestResult:
+    """Test sonuçlarını tutan veri sınıfı"""
+    position_name: str
+    mode: str
+    best_move: str
+    move_probabilities: Dict[str, float]
+    nodes: int
+    time_ms: int
+    nps: float
+    samples: int
+    samples_per_sec: float
+    pv_line: List[str]
+    score: float
+    backend_info: str
+
+class PathIntegralTester:
+    def __init__(self, lc0_path: str, weights_path: str = None):
+        """
+        Path Integral test aracını başlatır.
+
+        Args:
+            lc0_path: LC0 binary'sinin yolu
+            weights_path: Ağırlık dosyasının yolu (opsiyonel)
+        """
+        self.lc0_path = lc0_path
+        self.weights_path = weights_path
+        self.engine = None
+
+        if not os.path.exists(lc0_path):
+            raise FileNotFoundError(f"LC0 bulunamadı: {lc0_path}")
+
+        print(f"LC0 yolu: {lc0_path}")
+        if weights_path:
+            print(f"Ağırlık dosyası: {weights_path}")
+        else:
+            print("Uyarı: Ağırlık dosyası belirtilmedi, LC0 varsayılan ağı kullanacak")
+
+    def start_engine(self, mode: str = "competitive", **extra_options) -> chess.engine.SimpleEngine:
+        """
+        LC0 motorunu belirtilen Path Integral moduyla başlatır.
+
+        Args:
+            mode: Path Integral modu (competitive veya quantum_limit)
+            **extra_options: Ekstra UCI seçenekleri
+
+        Returns:
+            Başlatılmış chess engine
+        """
+        if self.engine:
+            self.engine.quit()
+
+        print(f"\n{'='*70}")
+        print(f"Motor başlatılıyor - Path Integral Mode: {mode}")
+        print(f"{'='*70}")
+
+        self.engine = chess.engine.SimpleEngine.popen_uci(self.lc0_path)
+
+        # Temel seçenekleri ayarla
+        options = {
+            "PathIntegralMode": mode,
+            "PathIntegralDebugMode": True,
+            "Threads": 2,
+            "Backend": "cuda-auto",  # GPU kullanımı için
+            "BackendOptions": "gpu=0",
+        }
+
+        # Ağırlık dosyası varsa ekle
+        if self.weights_path:
+            options["WeightsFile"] = self.weights_path
+
+        # Ekstra seçenekleri ekle
+        options.update(extra_options)
+
+        # Seçenekleri uygula
+        for key, value in options.items():
+            try:
+                self.engine.configure({key: value})
+                print(f"  ✓ {key} = {value}")
+            except chess.engine.EngineError as e:
+                print(f"  ✗ {key} ayarlanamadı: {e}")
+
+        # Backend bilgisini al
+        try:
+            backend_info = self.engine.options.get("Backend", "unknown")
+            print(f"\n  Backend: {backend_info}")
+        except:
+            print("  Backend bilgisi alınamadı")
+
+        return self.engine
+
+    def analyze_position(self,
+                        board: chess.Board,
+                        nodes: int = 1000,
+                        time_limit: float = None,
+                        multipv: int = 3) -> TestResult:
+        """
+        Bir pozisyonu analiz eder ve detaylı metrikleri toplar.
+
+        Args:
+            board: Analiz edilecek pozisyon
+            nodes: Analiz node sayısı
+            time_limit: Zaman limiti (saniye)
+            multipv: Gösterilecek varyasyon sayısı
+
+        Returns:
+            Test sonucu
+        """
+        if not self.engine:
+            raise RuntimeError("Motor başlatılmamış!")
+
+        # MultiPV ayarla
+        try:
+            self.engine.configure({"MultiPV": multipv})
+        except:
+            pass
+
+        # Analiz parametrelerini hazırla
+        limit_args = {}
+        if time_limit:
+            limit_args["time"] = time_limit
+        else:
+            limit_args["nodes"] = nodes
+
+        limit = chess.engine.Limit(**limit_args)
+
+        # Analizi başlat
+        print(f"\n  Pozisyon analiz ediliyor...")
+        print(f"  FEN: {board.fen()}")
+
+        start_time = time.time()
+        info_handler = InfoHandler()
+
+        try:
+            result = self.engine.analyse(
+                board,
+                limit,
+                info=info_handler.info_callback
+            )
+        except Exception as e:
+            print(f"  Analiz hatası: {e}")
+            raise
+
+        elapsed_time = time.time() - start_time
+
+        # Sonuçları işle
+        best_move = result.get("pv", [chess.Move.null()])[0]
+        pv_line = [move.uci() for move in result.get("pv", [])]
+        score = result.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
+
+        # Node ve sample bilgilerini topla
+        nodes_searched = info_handler.max_nodes or result.get("nodes", 0)
+        nps = nodes_searched / elapsed_time if elapsed_time > 0 else 0
+
+        # Sample bilgilerini tahmin et (Path Integral için)
+        # LC0'da her node bir sample olarak sayılabilir
+        samples = nodes_searched
+        samples_per_sec = samples / elapsed_time if elapsed_time > 0 else 0
+
+        # Move probabilities (MultiPV'den)
+        move_probs = {}
+        for pv_info in info_handler.multipv_results.values():
+            if pv_info and "pv" in pv_info and pv_info["pv"]:
+                move = pv_info["pv"][0]
+                # Score'u probability'ye çevir (yaklaşık)
+                score_val = pv_info.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
+                move_probs[move.uci()] = self._score_to_prob(score_val)
+
+        # Backend bilgisi
+        backend_info = str(self.engine.options.get("Backend", "unknown"))
+
+        # Mevcut modu al
+        current_mode = str(self.engine.options.get("PathIntegralMode", "unknown"))
+
+        return TestResult(
+            position_name=board.fen().split()[0],  # Sadece board kısmı
+            mode=current_mode,
+            best_move=best_move.uci(),
+            move_probabilities=move_probs,
+            nodes=nodes_searched,
+            time_ms=int(elapsed_time * 1000),
+            nps=nps,
+            samples=samples,
+            samples_per_sec=samples_per_sec,
+            pv_line=pv_line[:5],  # İlk 5 hamle
+            score=self._score_to_float(score),
+            backend_info=backend_info
+        )
+
+    def _score_to_prob(self, score: chess.engine.PovScore) -> float:
+        """Score'u probability'ye çevirir (sigmoid benzeri)"""
+        try:
+            cp = score.relative.score()
+            if cp is None:
+                return 0.5
+            # Sigmoid: 1 / (1 + exp(-x/100))
+            import math
+            return 1.0 / (1.0 + math.exp(-cp / 100.0))
+        except:
+            return 0.5
+
+    def _score_to_float(self, score: chess.engine.PovScore) -> float:
+        """Score'u float'a çevirir"""
+        try:
+            cp = score.relative.score()
+            return float(cp) / 100.0 if cp is not None else 0.0
+        except:
+            return 0.0
+
+    def print_result(self, result: TestResult):
+        """Test sonucunu güzel bir formatta yazdırır"""
+        print(f"\n{'='*70}")
+        print(f"  TEST SONUÇLARI - {result.mode.upper()} MODE")
+        print(f"{'='*70}")
+        print(f"  Pozisyon: {result.position_name}")
+        print(f"  Backend: {result.backend_info}")
+        print(f"\n  🎯 En İyi Hamle: {result.best_move}")
+        print(f"  📊 Değerlendirme: {result.score:+.2f}")
+        print(f"  🎲 Ana Varyasyon: {' '.join(result.pv_line)}")
+
+        print(f"\n  📈 PERFORMANS METRİKLERİ:")
+        print(f"     • Nodes (ziyaret edilen): {result.nodes:,}")
+        print(f"     • Süre: {result.time_ms:,} ms")
+        print(f"     • NPS (nodes/s): {result.nps:,.0f}")
+        print(f"     • Samples: {result.samples:,}")
+        print(f"     • Samples/s: {result.samples_per_sec:,.0f}")
+
+        if result.move_probabilities:
+            print(f"\n  🎲 HAMLE OLASILILARI (Top {len(result.move_probabilities)}):")
+            sorted_moves = sorted(result.move_probabilities.items(),
+                                 key=lambda x: x[1], reverse=True)
+            for move, prob in sorted_moves:
+                bar_length = int(prob * 30)
+                bar = "█" * bar_length + "░" * (30 - bar_length)
+                print(f"     {move}: {bar} {prob*100:.1f}%")
+
+        # GPU kullanımını kontrol et
+        gpu_used = "cuda" in result.backend_info.lower() or "gpu" in result.backend_info.lower()
+        print(f"\n  🖥️  GPU Kullanımı: {'✅ EVET' if gpu_used else '❌ HAYIR'}")
+
+        if result.nps > 100000:
+            print(f"  ⚡ Hız: YÜKSEK (GPU aktif olabilir)")
+        elif result.nps > 10000:
+            print(f"  ⚡ Hız: ORTA")
+        else:
+            print(f"  ⚡ Hız: DÜŞÜK (GPU kullanılmıyor olabilir)")
+
+        print(f"{'='*70}\n")
+
+    def run_comparison_test(self, positions: List[Tuple[str, str]],
+                           nodes: int = 1000):
+        """
+        Farklı modları karşılaştırmalı test eder.
+
+        Args:
+            positions: (isim, FEN) tuple listesi
+            nodes: Her pozisyon için node sayısı
+        """
+        modes = ["competitive", "quantum_limit"]
+        results = []
+
+        for mode in modes:
+            self.start_engine(mode=mode)
+
+            for pos_name, fen in positions:
+                board = chess.Board(fen)
+                print(f"\n📍 Test Pozisyonu: {pos_name}")
+
+                try:
+                    result = self.analyze_position(board, nodes=nodes)
+                    self.print_result(result)
+                    results.append(result)
+                except Exception as e:
+                    print(f"  ❌ Hata: {e}")
+
+        # Karşılaştırmalı özet
+        self.print_comparison_summary(results)
+
+        return results
+
+    def print_comparison_summary(self, results: List[TestResult]):
+        """Tüm sonuçların karşılaştırmalı özetini yazdırır"""
+        print(f"\n{'='*70}")
+        print(f"  KARŞILAŞTIRMALI ÖZET")
+        print(f"{'='*70}")
+
+        by_mode = {}
+        for result in results:
+            if result.mode not in by_mode:
+                by_mode[result.mode] = []
+            by_mode[result.mode].append(result)
+
+        for mode, mode_results in by_mode.items():
+            avg_nps = sum(r.nps for r in mode_results) / len(mode_results)
+            avg_samples_s = sum(r.samples_per_sec for r in mode_results) / len(mode_results)
+            total_nodes = sum(r.nodes for r in mode_results)
+
+            print(f"\n  🎮 {mode.upper()} MODE:")
+            print(f"     • Ortalama NPS: {avg_nps:,.0f}")
+            print(f"     • Ortalama Samples/s: {avg_samples_s:,.0f}")
+            print(f"     • Toplam Nodes: {total_nodes:,}")
+
+        print(f"\n{'='*70}\n")
+
+    def cleanup(self):
+        """Motor kaynaklarını temizler"""
+        if self.engine:
+            try:
+                self.engine.quit()
+            except:
+                pass
+
+class InfoHandler:
+    """UCI info mesajlarını yakalayan handler"""
+    def __init__(self):
+        self.multipv_results = {}
+        self.max_nodes = 0
+
+    def info_callback(self, info: chess.engine.InfoDict):
+        """Info callback fonksiyonu"""
+        multipv = info.get("multipv", 1)
+        self.multipv_results[multipv] = dict(info)
+
+        if "nodes" in info:
+            self.max_nodes = max(self.max_nodes, info["nodes"])
+
+
+def main():
+    """Ana test fonksiyonu"""
+    print("""
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║         LC0 PATH INTEGRAL TEST SUITE                          ║
+    ║         GPU & Performance Verification Tool                   ║
+    ╚═══════════════════════════════════════════════════════════════╝
+    """)
+
+    # LC0 binary yolu
+    script_dir = Path(__file__).parent
+    lc0_path = script_dir / "buildDir" / "lc0"
+
+    if not lc0_path.exists():
+        print(f"❌ LC0 binary bulunamadı: {lc0_path}")
+        print("   Lütfen projeyi derleyin: cd buildDir && ninja")
+        return 1
+
+    # Ağırlık dosyası (opsiyonel)
+    weights_path = None
+    if len(sys.argv) > 1:
+        weights_path = sys.argv[1]
+
+    # Test pozisyonları
+    test_positions = [
+        ("Başlangıç Pozisyonu", chess.STARTING_FEN),
+        ("Sicilian Defense", "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2"),
+        ("Taktiksel Pozisyon", "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4"),
+        ("Endgame", "8/5k2/3p4/1p1Pp3/pP2Pp2/P4P2/8/6K1 b - - 0 1"),
+    ]
+
+    try:
+        tester = PathIntegralTester(str(lc0_path), weights_path)
+
+        # Her mod için test et
+        print("\n🚀 Test başlatılıyor...\n")
+
+        results = tester.run_comparison_test(
+            test_positions,
+            nodes=800  # Her pozisyon için 800 node
+        )
+
+        print("\n✅ Tüm testler tamamlandı!")
+
+        # GPU kontrolü
+        gpu_detected = any("cuda" in r.backend_info.lower() for r in results)
+        print(f"\n🖥️  GPU Tespiti: {'✅ GPU KULLANILIYOR' if gpu_detected else '⚠️  GPU algılanamadı'}")
+
+        if not gpu_detected:
+            print("\n💡 GPU kullanımı için:")
+            print("   1. CUDA kurulu olduğundan emin olun")
+            print("   2. LC0'yı CUDA desteğiyle derleyin")
+            print("   3. Backend seçeneğini kontrol edin")
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Test kullanıcı tarafından durduruldu")
+        return 130
+    except Exception as e:
+        print(f"\n❌ Hata: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    finally:
+        try:
+            tester.cleanup()
+        except:
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
