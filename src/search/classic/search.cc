@@ -27,6 +27,12 @@
 
 #include "search/classic/search.h"
 
+#ifdef USE_PATH_INTEGRAL
+#include "search/path_integral/controller_simple.h"
+#include "search/path_integral/debug_logger.h"
+#include "search/path_integral/options.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -710,6 +716,51 @@ void Search::EnsureBestMoveKnown() REQUIRES(nodes_mutex_)
     }
   }
 
+
+  // Try Path Integral move selection first
+  if (path_integral_controller_ && path_integral_controller_->IsEnabled()) {
+    try {
+      // Get available moves from root node
+      std::vector<Move> legal_moves;
+      std::vector<float> move_scores;
+      float draw_score = GetDrawScore(false);  // Root is even depth
+      
+      for (const auto& edge : root_node_->Edges()) {
+        if (edge.GetN() > 0) {  // Only consider visited moves
+          legal_moves.push_back(edge.GetMove(played_history_.IsBlackToMove()));
+          float q_value = edge.GetQ(0.0f, draw_score);
+          move_scores.push_back(q_value);
+        }
+      }
+      
+      if (!legal_moves.empty()) {
+        // Use Path Integral to select move
+        Move selected_move = path_integral_controller_->SelectMove(
+          legal_moves, move_scores, played_history_.Last()
+        );
+        
+        // Find the corresponding edge and set as final move
+        for (const auto& edge : root_node_->Edges()) {
+          if (edge.GetMove(played_history_.IsBlackToMove()) == selected_move) {
+            final_bestmove_ = selected_move;
+            
+            // Set ponder move
+            if (edge.GetN() > 0 && edge.node()->HasChildren()) {
+              final_pondermove_ = GetBestChildNoTemperature(edge.node(), 1)
+                                      .GetMove(!played_history_.IsBlackToMove());
+            }
+            
+            return;  // Path Integral selection successful
+          }
+        }
+      }
+    } catch (...) {
+      // Silently fall back to standard selection on any error
+    }
+  }
+#endif
+
+  // Fallback to standard move selection
   auto bestmove_edge = temperature
                            ? GetBestRootChildWithTemperature(temperature)
                            : GetBestChildNoTemperature(root_node_, 0);

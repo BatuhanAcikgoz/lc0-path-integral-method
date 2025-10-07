@@ -56,6 +56,9 @@ has_backends = false
 # Third party files.
 includes += include_directories('third_party', is_system: true)
 
+# Add build directory to includes for generated protobuf headers
+includes += include_directories('.')
+
 # Compiling protobufs.
 compile_proto = find_program('scripts/compile_proto.py')
 gen = generator(compile_proto, output: ['@BASENAME@.pb.h'],
@@ -217,6 +220,9 @@ if path_integral_enabled
     'src/search/path_integral/softmax.cc',
     'src/search/path_integral/controller_simple.cc',
     'src/search/path_integral/options.cc',
+    'src/search/path_integral/debug_logger.cc',
+    'src/search/path_integral/performance_monitor.cc',
+    'src/tools/verify_path_integral_sampling.cc',
   ]
 endif
 
@@ -862,6 +868,16 @@ if get_option('rescorer')
 endif
 
 #############################################################################
+## Path Integral Verification Tool
+#############################################################################
+
+if path_integral_enabled
+  executable('verify_path_integral', 'src/tools/verify_path_integral_main.cc',
+       [common_files, 'src/tools/verify_path_integral_sampling.cc'],
+       include_directories: includes, dependencies: deps, install: true)
+endif
+
+#############################################################################
 ## Tests
 #############################################################################
 
@@ -914,6 +930,48 @@ if get_option('gtest')
       executable('softmax_test', 'src/search/path_integral/softmax_test.cc',
       include_directories: includes, link_with: lc0_lib, dependencies: gtest
     ), args: '--gtest_output=xml:softmax.xml', timeout: 90)
+    
+    # Performance manager test
+    test('PathIntegralPerformanceMonitorTest',
+      executable('performance_monitor_test', 'src/search/path_integral/performance_monitor_test.cc',
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:performance_monitor.xml', timeout: 90)
+    
+    # Sampling verification tool test
+    test('PathIntegralSamplingVerifierTest',
+      executable('sampling_verifier_test', ['src/tools/verify_path_integral_sampling_test.cc', pb_files],
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:sampling_verifier.xml', timeout: 90)
+    
+    # Debug logger test
+    test('PathIntegralDebugLoggerTest',
+      executable('debug_logger_test', 'src/search/path_integral/debug_logger_test.cc',
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:debug_logger.xml', timeout: 90)
+    
+    # Integration test
+    test('PathIntegralIntegrationTest',
+      executable('integration_test', ['src/tools/verify_path_integral_integration_test.cc', pb_files],
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:integration.xml', timeout: 120)
+    
+    # Edge case test
+    test('PathIntegralEdgeCaseTest',
+      executable('edge_case_test', ['src/search/path_integral/edge_case_test.cc', pb_files],
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:edge_case.xml', timeout: 120)
+    
+    # Configuration validation test
+    test('PathIntegralConfigurationValidationTest',
+      executable('configuration_validation_test', 'src/search/path_integral/configuration_validation_test.cc',
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:configuration_validation.xml', timeout: 90)
+    
+    # Comprehensive test suite
+    test('ComprehensivePathIntegralTestSuite',
+      executable('comprehensive_test_suite', ['src/search/path_integral/comprehensive_test_suite.cc', pb_files],
+      include_directories: includes, link_with: lc0_lib, dependencies: gtest
+    ), args: '--gtest_output=xml:comprehensive_test_suite.xml', timeout: 300)
   endif
 endif
 

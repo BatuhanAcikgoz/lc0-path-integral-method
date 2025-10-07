@@ -10,32 +10,6 @@ from tqdm import tqdm
 from cache import Cache
 import config
 
-# Optional math utilities fallback: prefer importing mathfuncs.Calc but provide
-# a minimal softmax implementation if it's absent to keep runtime robust.
-try:
-    from mathfuncs import Calc
-except Exception:
-    class Calc:
-        @staticmethod
-        def softmax(arr, lam=1.0):
-            import numpy as _np
-            try:
-                a = _np.array(arr, dtype=_np.float64)
-            except Exception:
-                return _np.array([])
-            if a.size == 0:
-                return _np.array([])
-            # numeric stability: subtract max
-            a = a - a.max()
-            # avoid division by zero
-            lam = float(lam) if lam is not None and lam != 0 else 1.0
-            with _np.errstate(over='ignore'):
-                ex = _np.exp(a / lam)
-            s = ex.sum()
-            if not _np.isfinite(s) or s <= 0:
-                return _np.ones_like(ex) / len(ex)
-            return ex / s
-
 
 class Engine:
     @staticmethod
@@ -95,9 +69,7 @@ class Engine:
                  caught and suppressed to ensure the process continues for the
                  rest of the engines.
         """
-        # Only print the shutdown message when not running in quiet CLI mode
-        if os.getenv("ENGINE_QUIET", "0") != "1":
-            print("Closing all persistent engines...")
+        print("Closing all persistent engines...")
         for engine in config._ENGINES.values():
             try:
                 engine.quit()
@@ -582,6 +554,7 @@ class Engine:
                             engine=engine,
                             options=(options or {"MultiPV": multipv})
                         )
+                        from mathfuncs import Calc
                         probs = Calc.softmax(scores, float(lam))
                         s = probs.sum()
                         if s <= 0 or not np.isfinite(s):
@@ -604,6 +577,7 @@ class Engine:
                         )
                         # Hareketler aynı sırada ise çarp, değilse eşleştir
                         hybrid_probs = []
+                        from mathfuncs import Calc
                         score_probs = Calc.softmax(scores, float(lam))
                         for i, mv in enumerate(moves):
                             try:
@@ -642,7 +616,7 @@ class Engine:
                         engine=engine,
                         options=(options or {"MultiPV": multipv})
                     )
-                    # using Calc (fallback defined at module top)
+                    from mathfuncs import Calc
                     probs = Calc.softmax(scores, float(lam))
                     s = probs.sum()
                     if s <= 0 or not np.isfinite(s):
@@ -657,7 +631,7 @@ class Engine:
                         depth=depth,
                         multipv=multipv if multipv is not None else config.MULTIPV
                     )
-                    # using Calc (fallback defined at module top)
+                    from mathfuncs import Calc
                     probs = Calc.softmax(scores, float(lam))
                     s = probs.sum()
                     if s <= 0 or not np.isfinite(s):
@@ -826,69 +800,3 @@ class Engine:
             scores.append(sc.white().score(mate_score=100000) or 100000)
         elapsed = time.perf_counter() - start
         return moves, scores, elapsed
-
-
-if __name__ == '__main__':
-    # Provide a minimal CLI that outputs strict JSON for subprocess callers.
-    import argparse
-    import json
-    import sys
-    import io
-
-    parser = argparse.ArgumentParser(description='Engine CLI for path-integral helper (JSON output).')
-    parser.add_argument('--fen', required=True, help='FEN string to analyze')
-    parser.add_argument('--depth', type=int, default=None)
-    parser.add_argument('--multipv', type=int, default=None)
-    parser.add_argument('--samples', type=int, default=1)
-    parser.add_argument('--lambda', dest='lam', type=float, default=1.0)
-    parser.add_argument('--reward_mode', type=str, default='hybrid')
-    parser.add_argument('--action', choices=['sample_paths', 'policy', 'top_moves'], default='sample_paths')
-    args = parser.parse_args()
-
-    # Silence atexit prints and other incidental prints during analysis
-    os.environ['ENGINE_QUIET'] = '1'
-
-    real_stdout = sys.stdout
-    real_stderr = sys.stderr
-    sys.stdout = io.StringIO()
-    sys.stderr = io.StringIO()
-    out = {'error': 'unknown'}
-    try:
-        try:
-            if args.action == 'sample_paths':
-                paths = Engine.sample_paths(args.fen, depth=args.depth, lam=args.lam, samples=max(1, int(args.samples)), multipv=args.multipv, reward_mode=args.reward_mode)
-                # compute first-move probabilities
-                from collections import Counter
-                first_moves = [p[0].uci() for p in paths if p]
-                cnt = Counter(first_moves)
-                total = sum(cnt.values())
-                moves = list(cnt.keys())
-                probs = [cnt[m] / total for m in moves] if total > 0 else []
-                out = {'moves': [{'uci': m, 'prob': float(p)} for m, p in zip(moves, probs)], 'raw_paths': [[mv.uci() if hasattr(mv, 'uci') else str(mv) for mv in p] for p in paths]}
-            elif args.action == 'policy':
-                moves, probs, elapsed = Engine.lc0_policy_and_moves(args.fen, depth=args.depth, multipv=args.multipv)
-                out = {'moves': [{'uci': (m.uci() if hasattr(m, 'uci') else str(m)), 'prob': float(p)} for m, p in zip(moves, probs)], 'elapsed': elapsed}
-            elif args.action == 'top_moves':
-                moves, scores, elapsed = Engine.lc0_top_moves_and_scores(args.fen, depth=args.depth, multipv=args.multipv)
-                # softmax scores to probs for convenience
-                try:
-                    import numpy as _np
-                    sc = _np.array([float(s) if s is not None else -1e6 for s in scores], dtype=_np.float64)
-                    sc = sc - sc.max()
-                    soft = _np.exp(sc)
-                    if soft.sum() <= 0:
-                        probs = [1.0 / len(soft)] * len(soft)
-                    else:
-                        probs = (soft / soft.sum()).tolist()
-                except Exception:
-                    probs = [1.0 / len(moves)] * len(moves) if moves else []
-                out = {'moves': [{'uci': m.uci() if hasattr(m, 'uci') else str(m), 'prob': float(p)} for m, p in zip(moves, probs)], 'elapsed': elapsed}
-            else:
-                out = {'error': 'unknown action'}
-        except Exception as e:
-            out = {'error': str(e)}
-    finally:
-        # restore stdout/stderr and print JSON cleanly
-        sys.stdout = real_stdout
-        sys.stderr = real_stderr
-        print(json.dumps(out))

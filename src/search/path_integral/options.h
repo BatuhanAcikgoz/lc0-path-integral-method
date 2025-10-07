@@ -9,6 +9,8 @@ extern const OptionId kPathIntegralLambdaId;
 extern const OptionId kPathIntegralSamplesId;
 extern const OptionId kPathIntegralRewardModeId;
 extern const OptionId kPathIntegralModeId;
+extern const OptionId kPathIntegralDebugModeId;
+extern const OptionId kPathIntegralMetricsFileId;
 
 }  // namespace lczero
 

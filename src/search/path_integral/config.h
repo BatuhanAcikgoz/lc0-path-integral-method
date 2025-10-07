@@ -35,6 +35,9 @@ struct PathIntegralConfig {
   bool enabled = false;
   bool debug_logging = false;
   
+  // Debug configuration
+  std::string metrics_file = "";  // Output file for debug metrics
+  
   // Export configuration
   std::string export_format = "none";  // "json", "csv", "none"
   

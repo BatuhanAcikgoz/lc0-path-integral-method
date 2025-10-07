@@ -43,6 +43,8 @@ class OptionsParser;
 class UciResponder;
 class SyzygyTablebase;
 
+
+
 class SearchBase {
  public:
   SearchBase(UciResponder* responder) : uci_responder_(responder) {}
@@ -53,6 +55,8 @@ class SearchBase {
   // that, only can be changed while the search is stopped.
   virtual void SetBackend(Backend* backend) { backend_ = backend; }
   virtual void SetSyzygyTablebase(SyzygyTablebase* tb) { syzygy_tb_ = tb; }
+
+
 
   // Resets search tree, and whatever else is needed to start a new game.
   virtual void NewGame() {}

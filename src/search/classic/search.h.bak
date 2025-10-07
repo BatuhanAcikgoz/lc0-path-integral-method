@@ -45,7 +45,8 @@
 #include "utils/mutex.h"
 
 #ifdef USE_PATH_INTEGRAL
-#include "search/path_integral/controller_simple.h"
+// Forward declaration to avoid circular dependency
+class SimplePathIntegralController;
 #endif
 
 

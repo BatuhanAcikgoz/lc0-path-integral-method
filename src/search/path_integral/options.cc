@@ -30,5 +30,19 @@ const OptionId kPathIntegralModeId{
          "Path Integral sampling mode: competitive (optimal play with search) or quantum_limit (detailed analysis with policy/value heads).",
      .visibility = OptionId::kAlwaysVisible}};
 
+const OptionId kPathIntegralDebugModeId{
+    {.long_flag = "path-integral-debug-mode",
+     .uci_option = "PathIntegralDebugMode",
+     .help_text =
+         "Enable detailed debug logging for Path Integral sampling verification. Outputs structured JSON logs for analysis.",
+     .visibility = OptionId::kAlwaysVisible}};
+
+const OptionId kPathIntegralMetricsFileId{
+    {.long_flag = "path-integral-metrics-file",
+     .uci_option = "PathIntegralMetricsFile",
+     .help_text =
+         "Output file path for Path Integral debug metrics and logs. If empty, logs are output to stderr only.",
+     .visibility = OptionId::kAlwaysVisible}};
+
 }  // namespace lczero
 

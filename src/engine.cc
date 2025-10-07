@@ -43,6 +43,8 @@
 #include "search/path_integral/controller_simple.h"
 #include "search/path_integral/interfaces.h"
 #include "search/path_integral/options.h"
+#include "search/path_integral/debug_logger.h"
+#include "search/classic/search.h"  // For dynamic_cast
 #endif
 
 namespace lczero {
@@ -93,6 +95,10 @@ void Engine::PopulateOptions(OptionsParser* options) {
   
   std::vector<std::string> sampling_modes = {"competitive", "quantum_limit"};
   options->Add<ChoiceOption>(kPathIntegralModeId, sampling_modes) = "competitive";
+  
+  // Debug and metrics options
+  options->Add<BoolOption>(kPathIntegralDebugModeId) = false;
+  options->Add<StringOption>(kPathIntegralMetricsFileId) = "";
 #endif
 }
 
@@ -176,6 +182,21 @@ Engine::Engine(const SearchFactory& factory, const OptionsDict& opts)
 #ifdef USE_PATH_INTEGRAL
   // Initialize Path Integral controller (backend will be set later in UpdateBackendConfig)
   path_integral_controller_ = std::make_unique<SimplePathIntegralController>(options_);
+  
+  // Set path integral controller in search (if it's classic search)
+  if (auto* classic_search = dynamic_cast<classic::Search*>(search_.get())) {
+    classic_search->SetPathIntegralController(path_integral_controller_.get());
+  }
+  
+  // Configure Path Integral debug logger
+  auto& debug_logger = PathIntegralDebugLogger::Instance();
+  debug_logger.SetEnabled(options_.Get<bool>(kPathIntegralDebugModeId));
+  debug_logger.SetOutputToStderr(true);  // Debug çıktısını stderr'a yönlendir
+  
+  std::string metrics_file = options_.Get<std::string>(kPathIntegralMetricsFileId);
+  if (!metrics_file.empty()) {
+    debug_logger.SetOutputFile(metrics_file);
+  }
 #endif
   
   if (options_.Get<bool>(kPreload)) {
@@ -206,6 +227,10 @@ void Engine::UpdateBackendConfig() {
     // Update Path Integral controller with new backend
     if (path_integral_controller_) {
       path_integral_controller_ = std::make_unique<SimplePathIntegralController>(options_, backend_.get());
+      // Update search with new controller (if it's classic search)
+      if (auto* classic_search = dynamic_cast<classic::Search*>(search_.get())) {
+        classic_search->SetPathIntegralController(path_integral_controller_.get());
+      }
     }
 #endif
   } else {
@@ -290,16 +315,82 @@ void Engine::Go(const GoParams& params) {
   last_go_params_ = params;
 
 #ifdef USE_PATH_INTEGRAL
-  // Path Integral integration - currently in development
-  // For now, let LC0's standard search handle move selection
-  // Path Integral will be integrated into the search process in future versions
+  // Update Path Integral debug logger configuration
+  auto& debug_logger = PathIntegralDebugLogger::Instance();
+  debug_logger.SetEnabled(options_.Get<bool>(kPathIntegralDebugModeId));
+  debug_logger.SetOutputToStderr(true);
   
+  std::string metrics_file = options_.Get<std::string>(kPathIntegralMetricsFileId);
+  if (!metrics_file.empty()) {
+    debug_logger.SetOutputFile(metrics_file);
+  }
+  
+  // Try Path Integral move selection if enabled
   if (path_integral_controller_ && path_integral_controller_->IsEnabled()) {
-    LOGFILE << "Path Integral: Enabled but delegating to LC0 search system";
+    LOGFILE << "Path Integral: Using Path Integral for move selection";
+
+    // Start debug session for this position
+    if (debug_logger.IsEnabled()) {
+      std::string fen = last_position_ ? PositionToFen(last_position_->CurrentPosition()) : "startpos";
+      debug_logger.StartSession(fen);
+      debug_logger.LogInfo("Path Integral search started");
+    }
     
-    // TODO: Integrate Path Integral sampling into LC0's search tree
-    // This will require modifying the MCTS algorithm to use Path Integral sampling
-    // at the root node while maintaining LC0's search quality
+    try {
+      // Use Path Integral to select move with empty limits (we'll use heuristic evaluation)
+      SearchLimits limits;
+
+      // Use Path Integral to select move
+      Position current_pos = last_position_->CurrentPosition();
+      Move selected_move = path_integral_controller_->SelectMove(current_pos, limits);
+
+      if (!selected_move.is_null()) {
+        // Path Integral succeeded, output the move
+        CERR << "Path Integral selected move: " << selected_move.ToString(false);
+
+        // Get performance metrics
+        auto metrics = path_integral_controller_->GetLastSamplingMetrics();
+
+        // Output thinking info first
+        std::vector<ThinkingInfo> thinking_infos;
+        ThinkingInfo thinking;
+        thinking.depth = 1;
+        thinking.seldepth = 1;
+        thinking.time = static_cast<int>(metrics.total_time_ms);
+        thinking.nodes = metrics.actual_samples;
+        thinking.nps = static_cast<int>(metrics.samples_per_second);
+        thinking.pv = {selected_move};
+        thinking.multipv = 1;
+        thinking_infos.push_back(thinking);
+        uci_forwarder_->OutputThinkingInfo(&thinking_infos);
+
+        // Output best move
+        BestMoveInfo info(selected_move);
+        info.player = current_pos.IsBlackToMove() ? -1 : 1;
+        uci_forwarder_->OutputBestMove(&info);
+
+        if (debug_logger.IsEnabled()) {
+          debug_logger.LogInfo("Path Integral search completed successfully");
+          debug_logger.EndSession();
+        }
+
+        return; // Don't fall back to standard search
+      } else {
+        CERR << "Path Integral failed to select move, falling back to standard LC0 search";
+        if (debug_logger.IsEnabled()) {
+          debug_logger.LogWarning("Path Integral returned null move, using fallback");
+        }
+      }
+    } catch (const std::exception& e) {
+      CERR << "Path Integral error: " << e.what() << ", falling back to standard LC0 search";
+      if (debug_logger.IsEnabled()) {
+        debug_logger.LogError("Path Integral exception: " + std::string(e.what()));
+      }
+    }
+
+    if (debug_logger.IsEnabled()) {
+      debug_logger.EndSession();
+    }
   }
 #endif
 
