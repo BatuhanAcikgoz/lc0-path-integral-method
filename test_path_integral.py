@@ -104,91 +104,121 @@ class PathIntegralTester:
 
         return self.engine
 
-    def analyze_position(self,
-                        board: chess.Board,
-                        nodes: int = 1000,
-                        time_limit: float = None,
-                        multipv: int = 3) -> TestResult:
+    def analyze_position(self, board: chess.Board, nodes: int = 20000,
+                        time_limit: float = None, multipv: int = 3,
+                        requested_samples: int = 1000) -> TestResult:
         """
-        Bir pozisyonu analiz eder ve detaylı metrikleri toplar.
-
+        Bir pozisyonu analiz eder ve Path Integral metriklerini toplar.
         Args:
             board: Analiz edilecek pozisyon
             nodes: Analiz node sayısı
             time_limit: Zaman limiti (saniye)
             multipv: Gösterilecek varyasyon sayısı
-
+            requested_samples: İstenen sample sayısı (info için)
         Returns:
             Test sonucu
         """
         if not self.engine:
             raise RuntimeError("Motor başlatılmamış!")
-
         # MultiPV ayarla
         try:
             self.engine.configure({"MultiPV": multipv})
         except:
             pass
-
         # Analiz parametrelerini hazırla
         limit_args = {}
         if time_limit:
             limit_args["time"] = time_limit
         else:
             limit_args["nodes"] = nodes
-
         limit = chess.engine.Limit(**limit_args)
-
         # Analizi başlat
-        print(f"\n  Pozisyon analiz ediliyor...")
-        print(f"  FEN: {board.fen()}")
-
+        print(f"\n  🔍 Pozisyon analiz ediliyor...")
+        print(f"  📍 FEN: {board.fen()}")
+        print(f"  📍 Sıra: {'Beyaz' if board.turn else 'Siyah'}")
         start_time = time.time()
-        info_handler = InfoHandler()
-
+        
         try:
             result = self.engine.analyse(
-                board,
+                board, 
                 limit,
-                info=info_handler.info_callback
+                multipv=multipv
+            )
+        except chess.engine.EngineError as e:
+            error_msg = str(e)
+            print(f"  ❌ Motor hatası: {error_msg}")
+            # Illegal move hatası varsa, detaylı rapor et
+            if "illegal" in error_msg.lower():
+                print(f"  ⚠️  UYARI: LC0 geçersiz bir hamle döndürdü!")
+                print(f"  📊 Bu, Path Integral implementasyonunda bir hata olabilir")
+                print(f"  🔍 Pozisyon: {board.fen()}")
+                print(f"  🎲 Yasal hamleler: {', '.join([m.uci() for m in board.legal_moves])}")
+            # Boş sonuç döndür
+            elapsed_time = time.time() - start_time
+            return TestResult(
+                position_name=board.fen().split()[0],
+                mode="ERROR",
+                best_move="NONE",
+                move_probabilities={},
+                nodes=0,
+                time_ms=int(elapsed_time * 1000),
+                nps=0,
+                samples=0,
+                samples_per_sec=0,
+                pv_line=[],
+                score=0.0,
+                backend_info="ERROR",
+                requested_samples=requested_samples
             )
         except Exception as e:
-            print(f"  Analiz hatası: {e}")
+            print(f"  ❌ Beklenmeyen hata: {e}")
+            import traceback
+            traceback.print_exc()
             raise
-
         elapsed_time = time.time() - start_time
-
-        # Sonuçları işle
-        best_move = result.get("pv", [chess.Move.null()])[0]
-        pv_line = [move.uci() for move in result.get("pv", [])]
-        score = result.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
-
+        # Sonuçları işle - result multipv aktifse liste olabilir
+        if isinstance(result, list):
+            # MultiPV aktif - ilk sonucu ana sonuç olarak al
+            main_result = result[0] if result else {}
+        else:
+            main_result = result
+            result = [result]  # Liste haline getir
+        # Best move'un yasal olduğunu kontrol et
+        best_move = main_result.get("pv", [chess.Move.null()])[0]
+        if best_move and best_move != chess.Move.null():
+            if best_move not in board.legal_moves:
+                print(f"  ⚠️  UYARI: Döndürülen hamle yasal değil: {best_move.uci()}")
+                print(f"  🎲 Yasal hamleler: {', '.join([m.uci() for m in board.legal_moves])}")
+        pv_line = [move.uci() for move in main_result.get("pv", [])]
+        score = main_result.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
         # Node ve sample bilgilerini topla
-        nodes_searched = info_handler.max_nodes or result.get("nodes", 0)
+        nodes_searched = main_result.get("nodes", 0)
         nps = nodes_searched / elapsed_time if elapsed_time > 0 else 0
-
-        # Sample bilgilerini tahmin et (Path Integral için)
-        # LC0'da her node bir sample olarak sayılabilir
+        # Path Integral'de gerçek sample sayısı
+        # LC0 Path Integral modunda her visit bir sample'dır
         samples = nodes_searched
         samples_per_sec = samples / elapsed_time if elapsed_time > 0 else 0
-
-        # Move probabilities (MultiPV'den)
+        # Move probabilities (MultiPV sonuçlarından)
         move_probs = {}
-        for pv_info in info_handler.multipv_results.values():
-            if pv_info and "pv" in pv_info and pv_info["pv"]:
-                move = pv_info["pv"][0]
-                # Score'u probability'ye çevir (yaklaşık)
-                score_val = pv_info.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
-                move_probs[move.uci()] = self._score_to_prob(score_val)
-
+        for pv_result in result:
+            if "pv" in pv_result and pv_result["pv"]:
+                move = pv_result["pv"][0]
+                # Sadece yasal hamleleri ekle
+                if move in board.legal_moves:
+                    score_val = pv_result.get("score", chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE))
+                    move_probs[move.uci()] = self._score_to_prob(score_val)
         # Backend bilgisi
-        backend_info = str(self.engine.options.get("Backend", "unknown"))
-
+        try:
+            backend_info = str(self.engine.options.get("Backend", chess.engine.Option("unknown", "", None, None, None, None)))
+        except:
+            backend_info = "unknown"
         # Mevcut modu al
-        current_mode = str(self.engine.options.get("PathIntegralMode", "unknown"))
-
+        try:
+            current_mode = str(self.engine.options.get("PathIntegralMode", chess.engine.Option("unknown", "", None, None, None, None)))
+        except:
+            current_mode = "unknown"
         return TestResult(
-            position_name=board.fen().split()[0],  # Sadece board kısmı
+            position_name=board.fen().split()[0],
             mode=current_mode,
             best_move=best_move.uci(),
             move_probabilities=move_probs,
@@ -197,9 +227,10 @@ class PathIntegralTester:
             nps=nps,
             samples=samples,
             samples_per_sec=samples_per_sec,
-            pv_line=pv_line[:5],  # İlk 5 hamle
+            pv_line=pv_line[:5],
             score=self._score_to_float(score),
-            backend_info=backend_info
+            backend_info=backend_info,
+            requested_samples=requested_samples
         )
 
     def _score_to_prob(self, score: chess.engine.PovScore) -> float:
@@ -263,7 +294,7 @@ class PathIntegralTester:
         print(f"{'='*70}\n")
 
     def run_comparison_test(self, positions: List[Tuple[str, str]],
-                           nodes: int = 1000):
+                           nodes: int = 20000):
         """
         Farklı modları karşılaştırmalı test eder.
 
